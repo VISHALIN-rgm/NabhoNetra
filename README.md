@@ -2,7 +2,7 @@
 
 NabhoNetra finds crop-residue fires from NASA satellite data, works out whether the smoke will reach a city, and turns each high-risk fire cluster into a **coordinated intervention**: farmers ask for help, registered machine providers and biomass buyers are proposed, an officer verifies the outcome, and only verified outcomes count as results.
 
-Built for farmers, machine providers, biomass buyers, field officers and administrators. React website, Python (FastAPI) server, AI agent on Amazon Bedrock, hosted on AWS.
+Built for farmers, machine providers, biomass buyers, field officers and administrators. React website, Python (FastAPI) server, and a Strands Agents AI layer using Amazon Bedrock by default, hosted on AWS.
 
 ## Contents
 1. [Architecture](#1-architecture)
@@ -70,16 +70,16 @@ flowchart LR
 | **AWS Amplify Hosting** | Serves the React website over HTTPS from a CDN, adds browser security headers | `deploy/deploy-frontend.sh` (optional `amplify.yml` for Git builds) |
 | **AWS App Runner** | Runs the container: REST API, 3-hourly data refresh, AI agent. One instance on purpose, because the scheduler runs inside the app | `deploy/apprunner.yaml` |
 | **Amazon ECR** | Stores the container image App Runner starts | created by `deploy/deploy.sh` |
-| **Amazon DynamoDB** (5 tables) | Subscribers, alerts, one-time codes (expire automatically), interventions with requests and claims, audit trail (the app can add rows but never change or delete them) | `apprunner.yaml` |
-| **Amazon S3** | Latest data snapshot and evidence photos | `apprunner.yaml` |
-| **AWS Secrets Manager** | FIRMS key and admin token, handed to the container at start | `apprunner.yaml` |
+| **Amazon DynamoDB** (5 tables) | Subscribers, alerts, one-time codes (expire automatically), interventions with requests and claims, audit trail (the app can add rows but never change or delete them) | `deploy/apprunner.yaml` |
+| **Amazon S3** | Latest data snapshot and evidence photos | `deploy/apprunner.yaml` |
+| **AWS Secrets Manager** | FIRMS key and admin token, handed to the container at start | `deploy/apprunner.yaml` |
 | **Amazon Bedrock** | Writes the alert text (default model Llama 3.3 70B). Templates are used if the model fails or for low-priority clusters | needs model access enabled |
-| **Amazon SNS** | SMS to subscribers, and the ops-alert topic | `apprunner.yaml` |
+| **Amazon SNS** | SMS to subscribers, and the ops-alert topic | `deploy/apprunner.yaml` |
 | **Amazon SES** | Email alerts and sign-in codes | verify identities yourself |
 | **AWS End User Messaging Social** | WhatsApp (optional, untested here) | `WhatsappPhoneId` parameter |
-| **Amazon CloudWatch** | Application logs, alarm on server errors that emails you | `apprunner.yaml` |
-| **AWS IAM** | One role for pulling the image, one for the running app (least privilege) | `apprunner.yaml` |
-| **AWS CloudFormation** | Creates and updates everything above in one stack called `nabhonetra` | `apprunner.yaml` |
+| **Amazon CloudWatch** | Application logs, alarm on server errors that emails you | `deploy/apprunner.yaml` |
+| **AWS IAM** | One role for pulling the image, one for the running app (least privilege) | `deploy/apprunner.yaml` |
+| **AWS CloudFormation** | Creates and updates everything above in one stack called `nabhonetra` | `deploy/apprunner.yaml` |
 
 Outside AWS: NASA FIRMS (fire detections), Open-Meteo (wind, forecast, air quality), OpenStreetMap Overpass and Nominatim (machinery listings, place names), Esri and CARTO (map tiles).
 
@@ -156,7 +156,7 @@ flowchart TD
   A["Your code"] --> B["deploy.sh in CloudShell,<br/>or deploy.ps1 on your PC"]
   B --> C["Docker builds the image"]
   C --> D["Push to Amazon ECR"]
-  D --> E["CloudFormation deploys apprunner.yaml:<br/>App Runner, DynamoDB, S3, Secrets,<br/>IAM, SNS, alarm"]
+  D --> E["CloudFormation deploys deploy/apprunner.yaml:<br/>App Runner, DynamoDB, S3, Secrets,<br/>IAM, SNS, alarm"]
   E --> F["API address<br/>https://...awsapprunner.com"]
   F --> G{"FRONTEND=amplify?"}
   G -->|"no, default"| H["App Runner also serves the website.<br/>One more update sets PUBLIC_URL"]
