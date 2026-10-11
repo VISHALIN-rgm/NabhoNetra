@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NabhoNetra on AWS App Runner (UNTESTED template, lint-clean - review before use)
+Parameters:
+  ImageUri: {Type: String, Description: 'ECR image URI with tag'}
+  FirmsKey: {Type: String, NoEcho: true}
+  AdminToken: {Type: String, NoEcho: true, AllowedPattern: '[A-Za-z0-9_-]{16,}', Description: '16 or more letters, digits, hyphens or underscores'}
+  OpsEmail: {Type: String, Default: "", Description: 'Email for CloudWatch alarm notices'}
+  SesFrom: {Type: String, Default: "", Description: 'Verified SES sender address, needed for email alerts'}
+  BedrockRegion: {Type: String, Default: us-west-2}
+  ModelId: {Type: String, Default: "us.meta.llama3-3-70b-instruct-v1:0"}
+  Bbox: {Type: String, Default: "74.0,29.0,77.0,32.0", Description: "west,south,east,north of the fire region"}
+  CityLat: {Type: String, Default: "28.6"}
+  CityLon: {Type: String, Default: "77.2"}
+  AlertWindowUtc: {Type: String, Default: "0-24", Description: 'UTC hour range for automatic alerts, for example 1-7'}
+  PublicUrl: {Type: String, Default: "", Description: 'Public https address of the site, used in response links. Set it after the first deploy to the service URL or your domain'}
+  WhatsappPhoneId: {Type: String, Default: "", Description: 'AWS End User Messaging Social phone number ID, to enable WhatsApp'}
+  DeliveryMode: {Type: String, Default: live, AllowedValues: [live, log], Description: 'log = test mode: nothing is sent, codes and response links are shown on screen. Use for demos only'}
+  IncludeDemo: {Type: String, Default: "0", AllowedValues: ["0", "1"], Description: 'Show demo data. Only works when DeliveryMode is log'}
+  AutoAlert: {Type: String, Default: "1", AllowedValues: ["0", "1"]}
+Conditions:
+  HasPublicUrl: !Not [!Equals [!Ref PublicUrl, ""]]
+  HasWhatsapp: !Not [!Equals [!Ref WhatsappPhoneId, ""]]
+  HasOps: !Not [!Equals [!Ref OpsEmail, ""]]
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration: {Status: Enabled}
+      BucketEncryption: {ServerSideEncryptionConfiguration: [{ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}}]}
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+  SubscribersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-subscribers'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: sid, AttributeType: S}]
+      KeySchema: [{AttributeName: sid, KeyType: HASH}]
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+  AlertsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-alerts'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: day, AttributeType: S}, {AttributeName: aid, AttributeType: S}]
+      KeySchema: [{AttributeName: day, KeyType: HASH}, {AttributeName: aid, KeyType: RANGE}]
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+  InterventionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-interventions'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: iid, AttributeType: S}]
+      KeySchema: [{AttributeName: iid, KeyType: HASH}]
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-audit'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: aid, AttributeType: S}]
+      KeySchema: [{AttributeName: aid, KeyType: HASH}]
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+  OtpTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-otps'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: oid, AttributeType: S}]
+      KeySchema: [{AttributeName: oid, KeyType: HASH}]
+      TimeToLiveSpecification: {AttributeName: ttl, Enabled: true}
+      SSESpecification: {SSEEnabled: true}
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      SecretString: !Sub '{"ADMIN_TOKEN":"${AdminToken}","FIRMS_KEY":"${FirmsKey}"}'
+  AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Statement: [{Effect: Allow, Principal: {Service: build.apprunner.amazonaws.com}, Action: 'sts:AssumeRole'}]}
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess']
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {Statement: [{Effect: Allow, Principal: {Service: tasks.apprunner.amazonaws.com}, Action: 'sts:AssumeRole'}]}
+      Policies:
+        - PolicyName: nabhonetra
+          PolicyDocument:
+            Statement:
+              - {Effect: Allow, Action: ['s3:GetObject', 's3:PutObject'], Resource: !Sub '${DataBucket.Arn}/*'}
+              - {Effect: Allow, Action: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'], Resource: '*'}
+              - {Effect: Allow, Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:Scan'], Resource: [!GetAtt SubscribersTable.Arn, !GetAtt AlertsTable.Arn, !GetAtt OtpTable.Arn, !GetAtt InterventionsTable.Arn]}
+              - {Effect: Allow, Action: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan'], Resource: [!GetAtt AuditTable.Arn]}   # append only: the app can add audit rows but never change or delete them
+              - {Effect: Allow, Action: ['social-messaging:SendWhatsAppMessage'], Resource: '*'}
+              - {Effect: Allow, Action: ['sns:Publish'], Resource: '*'}
+              - {Effect: Allow, Action: ['ses:SendEmail'], Resource: '*'}
+              - {Effect: Allow, Action: ['secretsmanager:GetSecretValue'], Resource: !Ref AppSecret}
+  Scaling:
+    Type: AWS::AppRunner::AutoScalingConfiguration
+    Properties: {MinSize: 1, MaxSize: 1, MaxConcurrency: 100}   # one instance only: the 3-hourly scheduler runs inside the app
+  Service:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: nabhonetra
+      AutoScalingConfigurationArn: !Ref Scaling
+      SourceConfiguration:
+        AutoDeploymentsEnabled: false
+        AuthenticationConfiguration: {AccessRoleArn: !GetAtt AccessRole.Arn}
+        ImageRepository:
+          ImageIdentifier: !Ref ImageUri
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: '8000'
+            RuntimeEnvironmentVariables:
+              - {Name: DELIVERY, Value: !Ref DeliveryMode}
+              - {Name: AUTO_ALERT, Value: !Ref AutoAlert}
+              - {Name: TRUST_PROXY, Value: '1'}
+              - {Name: STORE, Value: dynamodb}
+              - {Name: DDB_PREFIX, Value: !Ref 'AWS::StackName'}
+              - {Name: STORE_REGION, Value: !Ref 'AWS::Region'}
+              - {Name: SNAPSHOT_BUCKET, Value: !Ref DataBucket}
+              - {Name: INCLUDE_DEMO, Value: !Ref IncludeDemo}
+              - {Name: DATA_BUCKET, Value: !Ref DataBucket}
+              - {Name: ALERT_WINDOW_UTC, Value: !Ref AlertWindowUtc}
+              - !If [HasPublicUrl, {Name: PUBLIC_URL, Value: !Ref PublicUrl}, !Ref 'AWS::NoValue']
+              - !If [HasWhatsapp, {Name: WHATSAPP_PHONE_ID, Value: !Ref WhatsappPhoneId}, !Ref 'AWS::NoValue']
+              - {Name: SNS_REGION, Value: !Ref 'AWS::Region'}
+              - {Name: SES_REGION, Value: !Ref 'AWS::Region'}
+              - {Name: EMAIL_PROVIDER, Value: ses}
+              - {Name: SES_FROM, Value: !Ref SesFrom}
+              - {Name: BEDROCK_REGION, Value: !Ref BedrockRegion}
+              - {Name: BEDROCK_MODEL_ID, Value: !Ref ModelId}
+              - {Name: ALERT_LANG, Value: English}
+              - {Name: BBOX, Value: !Ref Bbox}
+              - {Name: CITY_LAT, Value: !Ref CityLat}
+              - {Name: CITY_LON, Value: !Ref CityLon}
+            RuntimeEnvironmentSecrets:
+              - {Name: ADMIN_TOKEN, Value: !Sub '${AppSecret}:ADMIN_TOKEN::'}
+              - {Name: FIRMS_KEY, Value: !Sub '${AppSecret}:FIRMS_KEY::'}
+      InstanceConfiguration: {Cpu: '1024', Memory: '2048', InstanceRoleArn: !GetAtt InstanceRole.Arn}
+      HealthCheckConfiguration: {Protocol: HTTP, Path: /api/health, Interval: 10, Timeout: 5, HealthyThreshold: 1, UnhealthyThreshold: 5}
+  OpsTopic:
+    Type: AWS::SNS::Topic
+  OpsSub:
+    Type: AWS::SNS::Subscription
+    Condition: HasOps
+    Properties: {TopicArn: !Ref OpsTopic, Protocol: email, Endpoint: !Ref OpsEmail}
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: NabhoNetra is returning server errors
+      Namespace: AWS/AppRunner
+      MetricName: 5xxStatusResponses
+      Dimensions: [{Name: ServiceName, Value: nabhonetra}, {Name: ServiceID, Value: !GetAtt Service.ServiceId}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OpsTopic]
+Outputs:
+  SiteUrl: {Value: !Sub 'https://${Service.ServiceUrl}'}
+  DataBucket: {Value: !Ref DataBucket}

@@ -1,0 +1,6 @@
+requests
+boto3
+strands-agents[openai,ollama]
+fastapi
+uvicorn
+python-multipart

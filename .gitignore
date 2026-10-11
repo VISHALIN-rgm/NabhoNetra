@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+node_modules/
+dist/
+nabhonetra.db
+*.db
+alternatives_cache.json
+.env
+*.db
+*.zip
+.venv/
+__pycache__/
+node_modules/
+frontend/dist/
+place_cache.json
+alternatives_cache.json

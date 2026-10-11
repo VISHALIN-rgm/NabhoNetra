@@ -1,0 +1,12 @@
+backend/.env
+**/node_modules
+**/__pycache__
+backend/*.db
+deploy
+*.zip
+.git
+**/.venv
+frontend/dist
+backend/evidence
+backend/.env.*
+!backend/.env.example
