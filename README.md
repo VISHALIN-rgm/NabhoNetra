@@ -1,8 +1,8 @@
 # NabhoNetra: crop-fire intelligence
 
-NabhoNetra finds crop-residue fires from NASA satellite data, works out whether the smoke will reach a city, and turns each high-risk fire cluster into a coordinated intervention: farmers ask for help, providers respond, officers verify outcomes, and administrators monitor the system.
+NabhoNetra uses NASA satellite data to identify crop-residue fires and estimate smoke risk to nearby cities. It connects farmers seeking help with providers, while officers verify outcomes and administrators oversee the response.
 
-Built for farmers, machine providers, biomass buyers, field officers and administrators. React website, Python (FastAPI) server, AI agent on Amazon Bedrock, and cloud deployment on AWS.
+Built for farmers, machine providers, biomass buyers, field officers and administrators, NabhoNetra combines a React/Vite website, a Python/FastAPI backend and Strands Agents. Its main cloud deployment runs on AWS.
 
 ## Contents
 1. [Architecture](#1-architecture)
@@ -22,91 +22,83 @@ Built for farmers, machine providers, biomass buyers, field officers and adminis
 
 ## 1. Architecture
 
-PNG copies of every diagram in this README are in `docs/diagrams/` for slides.
+PNG copies of the diagrams are in `docs/diagrams/`.
 
-The main production path is:
-- **React frontend** (optional: hosted on AWS Amplify)
-- **Python FastAPI backend** on **AWS App Runner**
-- **Amazon DynamoDB** for app data
-- **Amazon S3** for snapshots and evidence uploads
-- **Amazon Bedrock** for AI-generated alerts
-- **Amazon SNS / SES** for delivery
-- **AWS Secrets Manager** for sensitive secrets
+By default, App Runner serves the React/Vite frontend and FastAPI backend. AWS mode uses DynamoDB and S3 for data, Secrets Manager for credentials, and SNS/SES for notifications. Strands Agents powers AI alerts with Amazon Bedrock. Local mode defaults to SQLite and reads settings from `backend/.env`.
 
 ```mermaid
 flowchart LR
-  U["Users<br/>farmers, providers, buyers,<br/>officers, administrators"]
+  U["Users"]
   subgraph AWS["Your AWS account"]
-    AMP["AWS Amplify Hosting<br/>(optional frontend hosting)"]
-    subgraph RUN["AWS App Runner, one instance"]
-      API["FastAPI server<br/>REST API, scheduler,<br/>AI agent, sign-in"]
+    ECR[("Amazon ECR<br/>container image")]
+    subgraph RUN["AWS App Runner<br/>(one instance)"]
+      WEB["React/Vite website"]
+      API["FastAPI API, scheduler,<br/>sign-in and Strands Agent"]
     end
     DDB[("Amazon DynamoDB<br/>subscribers, alerts, codes,<br/>interventions, audit trail")]
     S3[("Amazon S3<br/>latest data snapshot,<br/>evidence photos")]
     SM["AWS Secrets Manager<br/>FIRMS key, admin token"]
-    BR["Amazon Bedrock<br/>Llama 3.3 70B writes alerts"]
-    SNS["Amazon SNS<br/>SMS + ops alerts"]
+    BR["Amazon Bedrock<br/>Llama 3.3 70B Instruct"]
+    SNS["Amazon SNS<br/>SMS + alarm notifications"]
     SES["Amazon SES<br/>email"]
-    WA["AWS End User Messaging Social<br/>WhatsApp, optional"]
     CW["Amazon CloudWatch<br/>logs and error alarm"]
-    OPS["Ops email<br/>via SNS topic"]
-    ECR[("Amazon ECR<br/>container image")]
+    AMP["AWS Amplify Hosting<br/>(optional frontend alternative)"]
+    WA["AWS End User Messaging Social<br/>(optional WhatsApp)"]
   end
   EXT["NASA FIRMS, Open-Meteo,<br/>OpenStreetMap"]
-  U -->|"opens the site"| AMP
-  U -->|"API calls, HTTPS"| API
+  U --> WEB
+  WEB -->|"API calls, HTTPS"| API
+  ECR --> RUN
+  U -.->|"optional site"| AMP
+  AMP -.->|"API calls"| API
   API --> DDB
   API --> S3
-  API -->|"reads secrets at start"| SM
+  API --> SM
   API --> BR
   API --> SNS
   API --> SES
-  API --> WA
+  API -.-> WA
   API -->|"fires, wind, places"| EXT
   API --> CW
-  CW --> OPS
-  ECR -->|"image"| RUN
+  CW --> SNS
 ```
 
-**Why this split.** The browser can load the website from Amplify or from the same App Runner service. The API accepts browser calls only from allowed addresses in `CORS_ORIGINS`, and the admin token is never exposed in the frontend.
+App Runner runs one instance because the refresh scheduler runs inside the app. Amplify is an optional separate frontend; in either path, browser access is restricted by `CORS_ORIGINS` and the admin token stays on the server.
 
 ## 2. AWS services used
 
-### Main production services (real app stack)
+### Main production services
 
-These are the services the project actually uses in its main deployment path:
+The production path uses these AWS services. The deploy script creates the ECR repository; CloudFormation provisions the app stack.
 
-| Service | What it does here | Used in project? |
+| Service | Purpose |
 |---|---|---|
-| **AWS App Runner** | Runs the FastAPI backend container, scheduler, alert logic, and API | Yes |
-| **Amazon ECR** | Stores the container image that App Runner deploys | Yes |
-| **Amazon DynamoDB** | Stores subscribers, OTP codes, alerts, interventions, audit records | Yes |
-| **Amazon S3** | Stores saved snapshots and uploaded evidence photos | Yes |
-| **AWS Secrets Manager** | Stores secrets like `FIRMS_KEY` and `ADMIN_TOKEN` | Yes |
-| **Amazon Bedrock** | Runs the AI model that generates alert text | Yes |
-| **Amazon SNS** | Sends SMS alerts and ops-notification topics | Yes |
-| **Amazon SES** | Sends email alerts and staff verification codes | Yes |
-| **Amazon CloudWatch** | Logs app activity and monitors 5xx errors | Yes |
-| **AWS IAM** | Gives the App Runner service the required permissions | Yes |
-| **AWS CloudFormation** | Provisions the deployment stack (`deploy/apprunner.yaml`) | Yes |
+| **AWS App Runner** | Runs the FastAPI container, website and in-process scheduler |
+| **Amazon ECR** | Stores the container image deployed to App Runner |
+| **Amazon DynamoDB** | Stores subscribers, codes, alerts, interventions and audit records |
+| **Amazon S3** | Stores snapshots, evidence photos and cached listings |
+| **AWS Secrets Manager** | Supplies the FIRMS key and admin token |
+| **Amazon Bedrock** | Runs the AI model used by Strands Agents for alert text |
+| **Amazon SNS** | Sends SMS alerts and CloudWatch alarm notifications |
+| **Amazon SES** | Sends email alerts and sign-in codes in live mode |
+| **Amazon CloudWatch** | Collects App Runner logs and monitors 5xx errors |
+| **AWS IAM** | Grants the App Runner services access to AWS resources |
+| **AWS CloudFormation** | Provisions the stack from `deploy/apprunner.yaml` |
 
-The default Bedrock model configured for the project is:
-- **`us.meta.llama3-3-70b-instruct-v1:0`**
+**Bedrock model:** `us.meta.llama3-3-70b-instruct-v1:0` (Llama 3.3 70B Instruct, default region `us-west-2`). If model access is unavailable, alerts fall back to templates.
 
-### Optional / conditional services
+### Optional deployment paths and integrations
 
-These are supported, but only used when you choose that option:
+These are not required for the default App Runner deployment:
 
-| Service | Used for | Optional? |
-|---|---|---|
-| **AWS Amplify Hosting** | Hosts the React frontend separately from the API | Yes |
-| **AWS End User Messaging Social** | WhatsApp alert delivery | Yes |
-| **SMTP server** | Alternative email sending path if SES is not used | Yes |
-| **Custom domain / HTTPS** | Public website and response links | Yes |
+- **AWS Amplify Hosting** — host the frontend separately from the API.
+- **AWS End User Messaging Social** — enable WhatsApp by configuring a phone number ID.
+- **SMTP** — alternate email provider when SES is not used.
+- **Custom domain** — use your own public website address.
 
 ### External services used by the app
 
-These are not AWS services, but they are part of the app runtime:
+External runtime services (not AWS):
 - **NASA FIRMS**: fire detections
 - **Open-Meteo**: wind and forecast data
 - **OpenStreetMap Overpass / Nominatim**: place names and alternative-provider listings
@@ -199,40 +191,40 @@ flowchart TD
 
 | Role | Sees | Can do |
 |---|---|---|
-| Public visitor | Alerts, map, wind, AI recommendation, suggested resources, timeline | Join or sign in |
-| Farmer | Interventions in their alert radius, their own requests and options proposed for them | Ask for help, choose or turn down an option, allow exact location (optional), withdraw |
-| Machine provider / biomass buyer | Only requests matched to them | Accept or decline, upload photo evidence, report work done (a claim) |
-| Officer | Interventions in their assigned district or state, or their own radius, never everything | Send requests, look for more options, verify or reject each claim |
-| Administrator | Everything, plus the audit trail | Refresh data, send alerts, register officers |
+| Public visitor | Alerts, map, wind, recommendations, resources and timeline | Join or sign in |
+| Farmer | Nearby interventions, own requests and proposed options | Request help, choose or decline an option, optionally share exact location, withdraw |
+| Provider / biomass buyer | Requests matched to them | Accept or decline, upload evidence, report work (a claim) |
+| Officer | Interventions in their assigned area | Send requests, find options, verify or reject claims |
+| Administrator | All records and audit trail | Refresh data, send alerts, register officers |
 
-**Farmer privacy.** Nothing about a farmer is shared when they ask. A provider first sees only the need, crop, acres and a rough distance. Name, contact and village appear after the provider accepts a request.
+**Farmer privacy.** Providers initially see only the need, crop, acres and rough distance. Name, contact and village are shared only after a provider accepts.
 
-**Completion is not verification.** A provider reports work done: that is a claim. An officer in the area reviews the note and photos and verifies or rejects each claim. Only verified claims count toward impact.
+**Completion is not verification.** Officers review each provider's work claim and evidence; only verified claims count toward impact.
 
-**Administrator access.** Administrators are created only on the server (`python make_admin.py`), never through the website or API, and sign in with a one-time code (8 hour sessions). The website never asks for the admin token.
+**Administrator access.** Create administrators on the server with `python make_admin.py` (never through the website/API). They sign in with a one-time code; the website never receives the admin token.
 
 **Other controls**
 
 | Control | Detail |
 |---|---|
-| Audit trail | Sign-ins, refreshes, alerts, officer registration, requests, claim decisions, evidence views and denied attempts: who, what, when, from where, never contact details. Administrator access is fully logged. |
-| Codes for staff | One-time codes for officers and administrators are never shown on the page, even in test mode |
-| Sessions | Signed tokens: 30 days (farmer, provider, buyer), 3 days (officer), 8 hours (administrator) |
-| CORS | The API accepts browser calls only from `CORS_ORIGINS` (https, or localhost), allows only the `x-session` and `Content-Type` headers, never `*` |
-| Browser policy | On Amplify: Content-Security-Policy (own scripts only, API address only), HSTS, no framing, no sniffing |
-| Rate limits | Per IP on sign-up, codes, requests and uploads; daily cap on verification messages |
-| Data | Evidence photos limited to JPEG or PNG under 5 MB; DynamoDB point-in-time recovery on; tables kept if the stack is deleted |
+| Audit trail | Records sign-ins, refreshes, alerts, officer registration, requests, claim decisions, evidence views and denied attempts—never contact details. |
+| Staff codes | Officer/admin one-time codes are never shown on the page, even in test mode. |
+| Sessions | Signed tokens expire after 30 days (users), 3 days (officers) or 8 hours (administrators). |
+| CORS | Only `CORS_ORIGINS` (HTTPS or localhost) and the `x-session` / `Content-Type` headers are allowed; never `*`. |
+| Browser policy | Amplify sets CSP, HSTS, no framing and no content sniffing. |
+| Rate limits | Per-IP limits on sign-up, codes, requests and uploads; daily verification-message cap. |
+| Data | Evidence photos: JPEG/PNG under 5 MB. DynamoDB point-in-time recovery is on; tables are retained if the stack is deleted. |
 
 ## 5. Build it locally
 
-**You need:** Python 3.12, Node.js 20, Git. No AWS account is needed for sample-data mode.
+**You need:** Python 3.12, Node.js 20 and Git. Sample-data mode needs no AWS account.
 
 ```powershell
 # 1. Backend
 cd backend
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env          # then edit FIRMS_KEY and ADMIN_TOKEN
+copy .env.example .env          # set FIRMS_KEY and ADMIN_TOKEN for live data/admin tools
 
 # 2. Website
 cd ..\frontend
@@ -244,48 +236,48 @@ cd ..\backend
 python server.py                # open http://127.0.0.1:8000
 ```
 
-- **Quick look with no network and no keys:** `$env:PIPELINE_MOCK="1"; python server.py` uses sample fire data.
-- **First run is slow:** place names and OpenStreetMap listings are looked up and cached. `/api/data` returns 503 for a minute or two until the first run finishes.
-- **Develop the website with live reload:** run the server as above, then in another window `cd frontend; npm run dev` and open http://localhost:5173 (it forwards `/api` to the server).
+- **Sample data, no network or keys:** `$env:PIPELINE_MOCK="1"; python server.py`.
+- **First run:** place lookups are cached; `/api/data` may return 503 for a minute or two.
+- **Live reload:** run the backend, then `cd frontend; npm run dev` in another window and open http://localhost:5173 (API requests are proxied).
+- **Separate frontend configuration:** copy `frontend/.env.example` to `frontend/.env` only when configuring a separate frontend; `VITE_API_URL` is public build-time configuration, never a secret.
 - **Test the Amplify-style split locally:** build with `$env:VITE_API_URL="http://127.0.0.1:8000"; npm run build`, serve `frontend\dist` on another port, and start the server with `$env:CORS_ORIGINS="http://localhost:5173"; python server.py`.
-- **Create your administrator, then sign in on the site:** `python make_admin.py --name "Your name" --channel email --contact you@example.com`. In test mode (`DELIVERY=log`) farmer and provider codes are printed in the server log.
-- **All India:** set `SCOPE=india` in `.env` and restart. The app then pulls every VIIRS detection in India, keeps the `MAX_CLUSTERS` biggest clusters (default 25) and judges each against its nearest major city.
-- **Docker alone:** `docker build -t nabhonetra .` then `docker run -p 8000:8000 --env-file backend/.env -v nabhonetra-data:/data nabhonetra`.
+- **Create an administrator, then sign in:** `python make_admin.py --name "Your name" --channel email --contact you@example.com`. In `DELIVERY=log` mode, farmer/provider codes appear in server logs.
+- **All India:** set `SCOPE=india` in `backend/.env` and restart; the app keeps the largest `MAX_CLUSTERS` (default 25) and assesses each against its nearest major city.
+- **Docker:** `docker build -t nabhonetra .` then `docker run -p 8000:8000 --env-file backend/.env -v nabhonetra-data:/data nabhonetra`.
 
 ## 6. Ship it on AWS
 
 ### 6.1 Main deployment path
 
-The project is designed around a simple AWS deployment stack that is used in production:
+For production, you need:
 
-1. **AWS account** with permission to use CloudFormation, ECR, IAM, App Runner, DynamoDB, S3, Secrets Manager, SNS, CloudWatch and Bedrock.
-2. **Region:** use **US West (Oregon) us-west-2**, where the default model is available.
-3. **Bedrock model access:** enable the model named in `ModelId` (default `us.meta.llama3-3-70b-instruct-v1:0`). Without it, alerts fall back to templates.
-4. **Keys:** your NASA FIRMS map key, and a fresh admin token (`openssl rand -hex 24`). Save the token in a password manager.
-5. **Email for sign-in codes (live mode only):** SES verified identities; while SES is in sandbox, verify each recipient too.
+1. An AWS account with access to CloudFormation, ECR, IAM, App Runner, DynamoDB, S3, Secrets Manager, SNS, SES, CloudWatch and Bedrock.
+2. **US West (Oregon), `us-west-2`** is the default region and supports the configured Bedrock model.
+3. Enable access to `us.meta.llama3-3-70b-instruct-v1:0`; alerts use templates if the model is unavailable.
+4. Get a NASA FIRMS map key and create an admin token (`openssl rand -hex 24`). Store the token securely.
+5. For live email, verify an SES sender identity; in the SES sandbox, verify each recipient too.
 
 ### 6.2 Deploy with AWS CloudShell (no Docker on your PC)
-CloudShell is the `>_` icon in the AWS console top bar, and it already has Docker and the AWS CLI. Upload the project zip (Actions, Upload file), then:
+CloudShell is the `>_` icon in the AWS console. It includes Docker and the AWS CLI. Upload and unzip the repository source, then run the following from its `deploy/` directory:
 
 ```bash
-unzip -q cropfire-agent-updated.zip; cd cropfire-agent/deploy
 read -rsp "FIRMS key: " FIRMS_KEY; echo; export FIRMS_KEY
 export ADMIN_TOKEN=$(openssl rand -hex 24); echo "SAVE THIS ADMIN TOKEN: $ADMIN_TOKEN"
 
-# Main deployment path: API on App Runner + data services + Bedrock + SNS/SES
-FRONTEND=apprunner DELIVERY_MODE=log bash deploy.sh
+# Safe first deployment: messages are logged, not sent.
+DELIVERY_MODE=log bash deploy.sh
 ```
 
-This deploys the main backend stack. It can take 15 minutes or more and prints:
+The default deploy uses App Runner to serve both the API and website. It can take 15 minutes or more and prints:
 
 ```
 Website: https://xxxx.us-west-2.awsapprunner.com
 API:     https://xxxx.us-west-2.awsapprunner.com
 ```
 
-Leave out `FRONTEND=amplify` to let App Runner serve the website itself. Keep the CloudShell tab open while it runs. If the build says "no space left on device", run `docker system prune -af` and retry.
+Keep the CloudShell tab open while it runs. If the build says "no space left on device", run `docker system prune -af` and retry.
 
-Optional settings (environment variables): `OPS_EMAIL` (error alarm emails), `SES_FROM` (verified sender), `PUBLIC_URL` (your own domain), `REGION`, `STACK`, `CORS_ORIGINS`, `DELIVERY_MODE`, `FRONTEND`.
+Optional environment variables: `OPS_EMAIL` (alarm emails), `SES_FROM` (verified sender), `PUBLIC_URL` (custom domain), `REGION`, `STACK`, `CORS_ORIGINS`, `DELIVERY_MODE` and `FRONTEND`.
 
 ### 6.3 Deploy from your PC (PowerShell, needs Docker Desktop)
 ```powershell
@@ -296,12 +288,10 @@ This serves the website from App Runner (single link). For the Amplify frontend,
 
 ### 6.4 Optional deployment choices
 
-These are optional and not required for the main app to work:
-
-- **AWS Amplify Hosting** for the frontend, separate from the API
-- **AWS End User Messaging Social** for WhatsApp alerts
-- **Custom domain and HTTPS** for the public website
-- **SMTP server** as a fallback for email delivery
+- **Separate frontend on Amplify:** run `FRONTEND=amplify DELIVERY_MODE=log bash deploy.sh` from `deploy/`.
+- **WhatsApp:** set the `WhatsappPhoneId` CloudFormation parameter and use an approved AWS End User Messaging Social number.
+- **Custom domain:** set `PUBLIC_URL` and configure the domain.
+- **SMTP:** an alternate email provider for local or customized deployments; the default CloudFormation stack uses SES.
 
 ### 6.5 Create the first administrator
 App Runner has no shell, so run this in CloudShell (or on your PC with `$env:STORE="dynamodb"; $env:DDB_PREFIX="nabhonetra"; $env:STORE_REGION="us-west-2"` set first and removed afterwards):
@@ -310,18 +300,18 @@ App Runner has no shell, so run this in CloudShell (or on your PC with `$env:STO
 cd ../backend
 STORE=dynamodb DDB_PREFIX=nabhonetra STORE_REGION=us-west-2 python3 make_admin.py --name "Your name" --channel email --contact you@example.com
 ```
-Open the website, press **Sign in**, enter that email. In `log` mode the code is in CloudWatch Logs (Log groups, `/aws/apprunner/nabhonetra/.../application`, search `code:`). In live mode it arrives via email or SMS.
+Open the website and sign in with that email. In `log` mode, find the code in CloudWatch Logs (`/aws/apprunner/nabhonetra/.../application`, search `code:`); live mode sends it by email or SMS.
 
 ### 6.6 Check it works
-- `https://YOUR-API/api/health` shows ok. A 503 on `/api/data` for the first minute or two is normal.
-- Open the website, join as a test farmer and a test provider, sign in as the farmer, ask for help, choose the provider, sign in as the provider to accept and report work, then sign in as the administrator to verify claims.
+- Confirm `https://YOUR-API/api/health` is healthy; `/api/data` may return 503 during its first run.
+- Test the workflow: farmer requests help and chooses a provider; the provider accepts and reports work; an administrator verifies the claim.
 - Test alert delivery in `log` mode first; never turn on `live` mode on a production stack until the test flow is proven.
 
 ### 6.7 Go fully live
 Re-run the same command without `DELIVERY_MODE=log`, with `SES_FROM` and `OPS_EMAIL` set. Live mode really sends messages and turns on automatic alerts.
 - **Email:** SES production access (leave the sandbox) so you can write to any address.
 - **SMS:** new SNS accounts start in the SMS sandbox. India needs sender ID and DLT registration.
-- **WhatsApp (optional):** an approved WhatsApp Business account in AWS End User Messaging Social. Pass `WhatsappPhoneId`.
+- **WhatsApp (optional):** use an approved WhatsApp Business account and set the `WhatsappPhoneId` CloudFormation parameter.
 - Never turn on demo data (`IncludeDemo`) on the stack real users use.
 
 ### 6.8 Update, redeploy, remove
@@ -336,7 +326,7 @@ Re-run the same command without `DELIVERY_MODE=log`, with `SES_FROM` and `OPS_EM
 App Runner bills while it runs. Check current AWS pricing for App Runner, Amplify, DynamoDB, Bedrock, SNS and SES before going live.
 
 ## 7. Configuration reference
-Local: `backend/.env`. On AWS: `deploy/apprunner.yaml` parameters set these for you. Full commented list in `backend/.env.example`.
+Local backend settings go in `backend/.env` (see `backend/.env.example`). For a separate frontend, use `frontend/.env.example`. On AWS, `deploy/apprunner.yaml` supplies deployment settings.
 
 | Setting | Meaning |
 |---|---|
