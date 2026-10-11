@@ -3,14 +3,135 @@
 Detects crop-residue fires from NASA FIRMS, groups them into clusters, ranks them by wind and distance to a target city, names the place and
 detection time, has an AI agent write an alert, and sends it to verified subscribers (farmers, machine providers, biomass buyers, officers).
 
-## Run locally (PowerShell)
+**Contents:** [Problem](#the-problem) · [How it works](#how-it-works-end-to-end) · [Architecture](#architecture) · [AWS services](#aws-services-used-and-why) · [Setup](#installation-and-setup) · [Local vs AWS](#local-development-vs-aws-deployment) · [Roadmap](#future-improvements-roadmap)
+
+## The problem
+Every autumn, burning of paddy residue (stubble) across north-west India sends smoke over cities such as Delhi. Farmers often burn because they see no affordable alternative in time, and the people who could help (machine providers, biomass buyers, local officers) rarely know where fires are starting or who needs them. Satellite data exists, but it is raw heat anomalies, not a decision.
+
+NabhoNetra turns those detections into something people can act on: *which* fire clusters matter most for a city, *who* nearby can offer an alternative to burning, and *whether* the help actually happened. It is an early-warning and coordination aid. Its risk index is an estimate from wind, distance and fire count, not a measured share of city air quality, and the Impact page shows an association, not proof of cause.
+
+## How it works end to end
+1. **Detect.** `backend/pipeline.py` fetches VIIRS fire detections from NASA FIRMS (a bounding box in city scope, or all of India with `SCOPE=india`).
+2. **Filter.** Low-confidence detections and repeating (likely industrial) heat sources are dropped.
+3. **Cluster.** Nearby detections are grouped; place names (OpenStreetMap/Nominatim) and detection times are attached.
+4. **Score risk.** Each cluster's smoke is moved along the 24-hour Open-Meteo wind forecast to see whether and when it reaches the target city. Clusters get a priority (high / medium / low) from wind, distance and fire count.
+5. **Generate alerts.** `backend/agent.py` asks the AI model (Bedrock by default) for a short alert; the text is checked for fire count, place and nearest alternative, retried once, then replaced by a template if it still fails. Low-priority clusters use templates.
+6. **Register.** People join as farmer, machine provider, biomass buyer or officer, confirm their contact with a one-time code, and consent is recorded. Administrators are created only on the server (`make_admin.py`).
+7. **Intervene.** For each high or medium cluster an intervention is opened; matched providers and buyers get requests, farmers and officers get notices (SMS via SNS, email via SES/SMTP, optional WhatsApp), only if they consented.
+8. **Verify impact.** Providers accept and report completion (note, optional photo); an officer verifies or rejects each claim and a satellite re-check is attached. Only officer-verified outcomes count on the Impact page.
+
+Details of each stage are in [How the agent works](#how-the-agent-works) and [Registry and interventions](#registry-and-interventions).
+
+## Architecture
+```mermaid
+flowchart LR
+  subgraph Sources[Data sources]
+    FIRMS[NASA FIRMS<br/>VIIRS fires]
+    OM[Open-Meteo<br/>wind forecast]
+    OSM[OpenStreetMap<br/>places, alternatives]
+  end
+  subgraph App[NabhoNetra server - FastAPI, one instance]
+    P[pipeline.py<br/>filter, cluster, risk]
+    A[agent.py<br/>alert writing and checks]
+    S[server.py<br/>API, scheduler, auth]
+    ST[(store.py<br/>SQLite or DynamoDB)]
+  end
+  LLM[Amazon Bedrock<br/>or OpenAI-compatible / Ollama]
+  UI[React + Vite dashboard<br/>Home, Live map, AI analysis,<br/>Interventions, Resources, Impact]
+  N[Notifications<br/>SNS SMS, SES / SMTP email, WhatsApp]
+  U[Farmers, providers,<br/>buyers, officers]
+  FIRMS --> P
+  OM --> P
+  OSM --> P
+  P --> A
+  A <--> LLM
+  P --> S
+  A --> S
+  S <--> ST
+  S <--> UI
+  S --> N
+  N --> U
+  U <--> UI
+```
+The React build is served by the same Python server, so one container runs everything. A scheduler inside the server refreshes data every `REFRESH_HOURS` (default 3).
+
+## AWS services used and why
+All AWS use is optional for local runs; the template is `deploy/apprunner.yaml`.
+
+| Service | Used for | Why |
+|---|---|---|
+| App Runner | Runs the Docker image (one instance) | Managed HTTPS hosting without servers. One instance only, because the scheduler runs inside the app |
+| ECR | Stores the Docker image | App Runner pulls from it |
+| DynamoDB | Subscribers, alerts, one-time codes (TTL), interventions, audit trail | Durable data that survives redeploys; the audit table is append-only for the app |
+| S3 | Latest data snapshot and evidence photos | Cheap object storage; restarts do not lose the last result |
+| Bedrock | Writes alert text (default model `us.meta.llama3-3-70b-instruct-v1:0`) | Managed model access with the instance IAM role, no API key. Model access must be enabled in the console |
+| SNS | SMS alerts and verification codes | Direct SMS publish. Sandbox and India DLT rules apply |
+| SES | Email alerts and verification codes | Managed email (`EMAIL_PROVIDER=ses`); sandbox needs verified addresses |
+| AWS End User Messaging Social | Optional WhatsApp messages | Needs an approved WhatsApp Business account (untested here) |
+| Secrets Manager | `ADMIN_TOKEN` and `FIRMS_KEY` | Keeps secrets out of the image and plain settings |
+| IAM | Instance role with least-needed permissions for the services above | App Runner access role for ECR |
+| CloudWatch | Logs and an alarm on server errors (notified by an SNS topic to `OpsEmail`) | Basic operations visibility; in `log` mode sign-in codes for staff appear in the logs |
+| CloudFormation | Creates all of the above from `deploy/apprunner.yaml` | One repeatable deploy |
+
+## Installation and setup
+
+### Prerequisites
+- Python 3.12 and Node.js 20 (these match the Dockerfile)
+- A free NASA FIRMS map key (`FIRMS_KEY`)
+- One AI model option: AWS Bedrock access, a Gemini/OpenAI-compatible key, or local Ollama. Without a working model, alerts fall back to templates
+- For deployment only: an AWS account, AWS CLI v2 signed in, and Docker
+
+### Key environment variables (`backend/.env`, copy from `.env.example`)
+| Variable | Meaning |
+|---|---|
+| `FIRMS_KEY` | NASA FIRMS key (required for real data) |
+| `ADMIN_TOKEN` | Long random secret (16+ characters) for operator API calls; also the default signing secret |
+| `SCOPE` | `city` (default, uses `BBOX`, `CITY_LAT`, `CITY_LON`) or `india` |
+| `DELIVERY` | `log` (test mode, nothing sent) or `live` |
+| `MODEL_PROVIDER`, `MODEL_ID`, `MODEL_API_KEY`, `MODEL_BASE_URL` | AI model: `bedrock` (default), `openai` or `ollama` |
+| `STORE` | `sqlite` (default) or `dynamodb` (with `DDB_PREFIX`, `STORE_REGION`, `SNAPSHOT_BUCKET`) |
+| `EMAIL_PROVIDER`, `SES_FROM`, `SMTP_*` | Email delivery |
+| `PUBLIC_URL` | Public site address, used in provider response links |
+
+Frontend: `frontend/.env.example` only has the optional `VITE_DATA_URL`; anything starting with `VITE_` is public.
+
+### Local development
+Backend (PowerShell shown; on macOS/Linux use `python3 -m venv .venv && source .venv/bin/activate` and `cp`):
+
     cd backend
     python -m venv .venv; .\.venv\Scripts\Activate.ps1
     pip install -r requirements.txt
     copy .env.example .env      # then edit: FIRMS_KEY, ADMIN_TOKEN, model settings
-    cd ..\frontend; npm install; npm run build; cd ..\backend
-    python server.py            # open http://127.0.0.1:8000
-For a quick look with sample data and no network: `$env:PIPELINE_MOCK="1"; python server.py`.
+    python server.py            # API on http://127.0.0.1:8000
+
+Frontend, either as a production build served by the backend (build it, then restart the server):
+
+    cd frontend; npm install; npm run build
+
+or with hot reload (the dev server proxies `/api` to port 8000):
+
+    cd frontend; npm install; npm run dev     # http://localhost:5173
+
+For a quick look with sample data and no network: `$env:PIPELINE_MOCK="1"; python server.py` (bash: `PIPELINE_MOCK=1 python server.py`).
+Tests: `cd frontend; npm test`, and the backend checks in [Check it works](#check-it-works).
+
+### Build and ship
+Docker (local or any container host):
+
+    docker build -t nabhonetra .
+    docker run -p 8000:8000 --env-file backend/.env -v nabhonetra-data:/data nabhonetra
+
+The image builds the frontend, bundles it with the backend and stores SQLite in `/data`. To ship to AWS, follow [Deploy on AWS (App Runner)](#deploy-on-aws-app-runner) below, then create the first administrator.
+
+## Local development vs AWS deployment
+| | Local | AWS (App Runner) |
+|---|---|---|
+| Storage | SQLite file (`STORE=sqlite`) | DynamoDB + S3 (`STORE=dynamodb`) |
+| AI model | Bedrock, Gemini/OpenAI-compatible or Ollama | Bedrock through the instance IAM role |
+| Secrets | `backend/.env` | Secrets Manager |
+| Messages | `DELIVERY=log` by default | `DeliveryMode` parameter (`live` is the template default; use `log` for a first try) |
+| Admin creation | `python make_admin.py` | Run `make_admin.py` from your computer against the tables |
+| Frontend | Vite dev server or `dist/` | `dist/` baked into the image |
 
 ## All-India mode
 Set `SCOPE=india` in `backend/.env` (restart the server). The app then asks NASA FIRMS for every VIIRS detection in India (country query `IND`; if that fails it falls back to an India bounding box, which also includes slivers of neighbouring countries), keeps the `MAX_CLUSTERS` biggest clusters nationwide (default 25), and pairs each with its nearest major city from `backend/cities.py` for the wind and smoke forecast. Alerts name that city. The home page shows the scope instead of one target city, and the map has no single "target" marker. `BBOX`, `CITY_*` are ignored. Check with `python scope_test.py`.
@@ -108,3 +229,13 @@ The Interventions page is public to read (alerts, map, wind, AI recommendation, 
 
 **Administration:** create an administrator on the server with `python make_admin.py --name "Your name" --channel email --contact you@example.com`, then sign in on the website with a code. Codes for officers and administrators are never shown on the page, even in test mode (they appear in the server log). Every sensitive action (sign-in, refresh, alerts, officer registration, requests, claim decisions, evidence views, denied attempts) is written to an append-only audit trail with who, what and where, never contact details. Administrators read it at the bottom of the Interventions page or at `/api/audit`. In AWS the app can add audit rows but not change or delete them.
 
+## Future improvements (roadmap)
+Ideas, not current features:
+- Validate risk scoring against measured air-quality data and report accuracy
+- More data sources (additional satellites, ground sensors) and finer smoke dispersion modelling
+- Multilingual alerts and message templates beyond the configured `ALERT_LANG`
+- Production-ready WhatsApp delivery and SMS sender/DLT registration
+- Verified, curated directories of machine providers and biomass buyers instead of OpenStreetMap listings only
+- Multi-instance scheduling (for example a separate scheduled job) so the service can scale beyond one App Runner instance
+- Custom domain, CI/CD pipeline and automated deployment tests
+- Mobile-friendly or offline-first views for field use
