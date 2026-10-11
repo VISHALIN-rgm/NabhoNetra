@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "./api.js";
+import { api, API } from "./api.js";
 import { Badge } from "./ui.jsx";
 import { placeOf, fmtTime } from "./shared.js";
 
@@ -12,7 +12,7 @@ export default function Respond({ token }) {
   const upload = async () => {
     if (!file) return;
     const fd = new FormData(); fd.append("file", file);
-    const r = await fetch(`/api/respond/${token}/evidence`, { method: "POST", body: fd }); const j = await r.json().catch(() => ({}));
+    const r = await fetch(`${API}/api/respond/${token}/evidence`, { method: "POST", body: fd }); const j = await r.json().catch(() => ({}));
     setMsg(r.ok ? "Photo added as evidence." : j.detail || "Could not upload the photo."); setFile(null);
   };
   if (err) return <section className="page narrow"><div className="card"><h2>This link cannot be used</h2><p className="muted">{err}</p></div></section>;

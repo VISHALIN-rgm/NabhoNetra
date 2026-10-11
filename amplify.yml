@@ -1,0 +1,21 @@
+# Optional: build on every git push when you connect this repository to Amplify Hosting (console, Host web app, GitHub).
+# In the Amplify console set the environment variable VITE_API_URL to your App Runner address, and set the app's
+# monorepo folder to "frontend". The script deploy/deploy-frontend.sh does the same without Git.
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: dist
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*

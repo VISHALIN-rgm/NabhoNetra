@@ -179,6 +179,16 @@ async def lifespan(_app):
 
 app = FastAPI(title="NabhoNetra", lifespan=lifespan)
 
+def cors_origins():
+    """Websites allowed to call this API from a browser (CORS_ORIGINS, comma separated). https only, or localhost for development; '*' is never accepted."""
+    ok = lambda o: o.startswith("https://") or re.match(r"^http://(localhost|127\.0\.0\.1)(:\d+)?$", o)
+    return [o for o in (x.strip().rstrip("/") for x in os.getenv("CORS_ORIGINS", "").split(",")) if o and ok(o)]
+if cors_origins():
+    from fastapi.middleware.cors import CORSMiddleware
+    # Only the headers the website uses. The admin token header is deliberately not allowed, so no web page can send it.
+    app.add_middleware(CORSMiddleware, allow_origins=cors_origins(), allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                       allow_headers=["Content-Type", "x-session"], allow_credentials=False, max_age=600)
+
 @app.middleware("http")
 async def security_headers(request, call_next):
     r = await call_next(request)

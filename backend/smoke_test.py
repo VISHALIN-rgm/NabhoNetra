@@ -1,7 +1,7 @@
 """End-to-end check of the server API using sample data (no network, no messages sent). Run: python smoke_test.py"""
 import json, os, re, tempfile, time
 for k, v in dict(ADMIN_TOKEN="test_token_1234567890", PIPELINE_MOCK="1", DELIVERY="log", USE_AGENT="0", PUBLIC_URL="https://example.test",
-                 DB_PATH=os.path.join(tempfile.mkdtemp(), "t.db")).items():
+                 DB_PATH=os.path.join(tempfile.mkdtemp(), "t.db"), CORS_ORIGINS="https://main.d123abc.amplifyapp.com, http://localhost:5173, *, http://evil.example").items():
     os.environ.setdefault(k, v)
 from fastapi.testclient import TestClient
 import server, agent, store
@@ -196,7 +196,18 @@ with TestClient(server.app) as c:
     nb = c.get("/api/data").json()["clusters"][0]["nearby"]; assert nb["farmer"] >= 2 and nb["machine_provider"] >= 1 and "_cells" not in c.get("/api/data").text
     imp = c.get("/api/impact").json(); assert "enough" in imp and "note" in imp and server.in_window()
 
-    # --- demo subscribers stay hidden and are never messaged
+    # --- website on another address (Amplify): CORS lets in only the listed sites and only the headers the website uses
+    ok_o, bad_o = "https://main.d123abc.amplifyapp.com", "https://evil.example"
+    pf = lambda o, h: c.options("/api/me", headers={"Origin": o, "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": h})
+    r = pf(ok_o, "x-session"); assert r.status_code == 200 and r.headers.get("access-control-allow-origin") == ok_o, "listed website allowed"
+    assert pf("http://localhost:5173", "content-type").headers.get("access-control-allow-origin") == "http://localhost:5173"
+    assert "access-control-allow-origin" not in pf(bad_o, "x-session").headers, "unlisted website refused"
+    assert "access-control-allow-origin" not in pf("http://evil.example", "x-session").headers, "plain http (non-local) is never accepted"
+    assert pf(ok_o, "x-admin-token").status_code == 400, "the admin token header is not allowed from any web page"
+    assert c.get("/api/health", headers={"Origin": ok_o}).headers.get("access-control-allow-origin") == ok_o
+    assert server.cors_origins() == [ok_o, "http://localhost:5173"], "wildcards and insecure origins are dropped"
+
+# --- demo subscribers stay hidden and are never messaged
     base_n = send()
     import seed_demo
     n_demo = seed_demo.seed(); assert n_demo >= 4

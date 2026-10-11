@@ -15,3 +15,5 @@ node_modules/
 frontend/dist/
 place_cache.json
 alternatives_cache.json
+
+.site/

@@ -10,3 +10,4 @@ frontend/dist
 backend/evidence
 backend/.env.*
 !backend/.env.example
+.site

@@ -3,6 +3,7 @@ WORKDIR /w
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend/ ./
+ARG VITE_API_URL=
 RUN npm run build
 
 FROM python:3.12-slim

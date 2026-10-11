@@ -14,11 +14,14 @@ export function clearSession() {
 // Calls the NabhoNetra server (FastAPI). Every call carries the sign-in session when there is one.
 // The website never holds an admin token: administrators and officers sign in with a one-time code like everyone else,
 // and the server decides on every call what that person's role and area allow.
+// Where the API lives. Empty = same address as the website (App Runner serves both); set VITE_API_URL when the website is hosted elsewhere (Amplify).
+export const API = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+
 export async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
   const sess = getSession();
   if (sess) headers["x-session"] = sess;
-  const r = await fetch(path, { ...opts, headers });
+  const r = await fetch(API + path, { ...opts, headers });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
     const d = j.detail;
@@ -29,7 +32,7 @@ export async function api(path, opts = {}) {
 
 export async function apiBlob(path) {
   const sess = getSession();
-  const r = await fetch(path, { headers: sess ? { "x-session": sess } : {} });
+  const r = await fetch(API + path, { headers: sess ? { "x-session": sess } : {} });
   if (!r.ok) throw new Error("Could not load the file.");
   return URL.createObjectURL(await r.blob());
 }

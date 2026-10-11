@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Send, BadgeCheck, Image as ImageIcon, UserPlus, LogIn, Lock, MapPinOff } from "lucide-react";
 import { Badge } from "./ui.jsx";
-import { api, apiBlob, getSession } from "./api.js";
+import { api, apiBlob, getSession, API } from "./api.js";
 import { fmtTime } from "./shared.js";
 import { ROLE_LABEL, RQ_LABEL, RQ_STEPS, rqDone, NEED_LABEL } from "./ivutil.js";
 
@@ -68,7 +68,7 @@ export default function RolePanel({ item, me, flash, reload, onJoin, onSignIn })
     action === "accept" ? "Accepted. You can now see the farmers who chose you." : action === "decline" ? "Noted. Thank you for replying." : "Thank you. An officer will check the outcome.");
   const upload = () => run(async () => {
     const fd = new FormData(); fd.append("file", file);
-    const r = await fetch(`/api/interventions/${iv.id}/evidence`, { method: "POST", body: fd, headers: { "x-session": getSession() } });
+    const r = await fetch(`${API}/api/interventions/${iv.id}/evidence`, { method: "POST", body: fd, headers: { "x-session": getSession() } });
     const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.detail || "Could not upload the photo."); return j;
   }, "Photo added as evidence.");
   const coordinate = () => run(() => post("coordinate"), (r) => { setLinks(r.links || []); return r.asked ? `Requests sent to ${r.asked} matched part${r.asked > 1 ? "ies" : "y"}` : "Nobody consenting could be asked yet"; });
